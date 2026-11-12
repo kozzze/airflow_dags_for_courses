@@ -1,4 +1,5 @@
-import Path
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from airflow import DAG
 from airflow.operators.python import PythonOperator
