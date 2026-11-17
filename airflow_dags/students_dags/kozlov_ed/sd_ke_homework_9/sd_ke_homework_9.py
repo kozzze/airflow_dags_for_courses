@@ -1,10 +1,11 @@
-import Path
+import os
+import sys
 from datetime import datetime, timedelta, timezone
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sd_ke_homework_9.subtask_scripts.tasks import rabbit_to_s3, s3_to_clickhouse
 
 with DAG(
