@@ -258,5 +258,5 @@ def s3_to_clickhouse(**context):
         _ch(sql)
         log.info('Загружено в %s.%s', CH_DB, table)
 
-    total = _ch(f"SELECT count() FROM {CH_DB}.fact_supply_line FINAL")[0][0]
+    total = _ch(f"SELECT count() FROM {CH_DB}.fact_supply_line")[0][0]
     log.info('Файл %s загружен (%s строк). Всего в fact_supply_line: %s', key, info['rows'], total)
