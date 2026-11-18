@@ -8,12 +8,19 @@ REQUIRED = (
     "received_amount", "delay_days",
 )
 
-COLUMNS = [
-    "supply_line_id", "supply_id", "event_time", "supplier_id",
-    "supplier_name", "supplier_country", "product_id", "product_name",
-    "product_category", "product_brand", "warehouse_id", "warehouse_name",
-    "warehouse_region", "ordered_qty", "received_qty", "shortage_qty",
-    "received_amount", "unit_price", "delay_days", "event_type",
+COLUMNS = COLUMNS = [
+    "supply_line_id",
+    "supply_id",
+    "event_time",
+    "supplier_id",
+    "product_id",
+    "warehouse_id",
+    "ordered_qty",
+    "received_qty",
+    "received_amount",
+    "delay_days",
+    "shortage_qty",
+    "unit_price",
 ]
 
 
