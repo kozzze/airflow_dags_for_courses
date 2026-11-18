@@ -1,0 +1,44 @@
+import datetime
+import os
+import sys
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+from subtask_scripts import sd_saa_extract_to_s3, sd_saa_load_to_clickhouse
+
+default_args = {
+    "owner": "stroinyi_aa",
+    "depends_on_past": False,
+    "start_date": datetime.datetime(2020, 7, 1, 0, 0),
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 0,
+    "retry_delay": datetime.timedelta(minutes=1),
+    "pool": "default",
+}
+
+with DAG(
+    dag_id="sd_saa_homework_9",
+    default_args=default_args,
+    schedule=None,
+    start_date=datetime.datetime(2020, 7, 1, 0, 0),
+    catchup=False,
+    tags=["stroinyi_aa", "homework_9"],
+) as dag:
+
+    task_extract = PythonOperator(
+        task_id="extract_rabbitmq_to_s3",
+        python_callable=sd_saa_extract_to_s3.extract_rabbitmq_to_s3,
+        dag=dag,
+    )
+
+    task_load = PythonOperator(
+        task_id="load_s3_to_clickhouse",
+        python_callable=sd_saa_load_to_clickhouse.load_s3_to_clickhouse,
+        dag=dag,
+    )
+
+    task_extract >> task_load
