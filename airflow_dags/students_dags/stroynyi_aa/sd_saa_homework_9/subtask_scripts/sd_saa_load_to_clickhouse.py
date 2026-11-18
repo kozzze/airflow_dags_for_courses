@@ -11,8 +11,8 @@ S3_ENDPOINT = "https://storage.yandexcloud.net"
 MY_LOGIN = "stroinyi_aa"  
 CH_HOST = "111.88.243.32" 
 
+# --- НАСТРОЙКИ ДЛЯ CLICKHOUSE ---
 S3_COLLECTION = "s3_dad_ksu_datalab"
-# Маска поиска файлов в S3
 S3_FILENAME = f"dad-ksu-datalab/DATA/{MY_LOGIN}/*.json"
 
 STG_COLUMNS = (
@@ -29,6 +29,7 @@ DIMS = [
     "dim_region"
 ]
 
+# Обновленный запрос: используем ИМЕНОВАННУЮ КОЛЛЕКЦИЮ вместо access_key и secret_key
 LOAD_STG = f"""
 insert into stroinyi_aa_db.stg_events
 select *
@@ -101,16 +102,37 @@ from (
 )
 """
 
-def upload_to_s3(**context) -> None:
-    pass # Эта функция больше не нужна, так как все делает ClickHouse. Оставлена для совместимости.
+def check_duplicates(client, table_name, key_column):
+    """Проверяет наличие дублей по ключу в таблице и выводит результат в логи."""
+    query = f"""
+        SELECT count() FROM (
+            SELECT {key_column} 
+            FROM stroinyi_aa_db.{table_name} 
+            GROUP BY {key_column} 
+            HAVING count() > 1
+        )
+    """
+    dup_count = client.execute(query)[0][0]
+    if dup_count > 0:
+        print(f"⚠️ ВНИМАНИЕ: В таблице {table_name} найдено {dup_count} дубликатов по ключу {key_column}!")
+    else:
+        print(f"✅ В таблице {table_name} дубликатов нет.")
 
 def rebuild_dimensions(client):
-    # ВАЖНО: Автоматически создаем пустые таблицы, если их нет в базе!
+    # Автоматически создаем пустые таблицы, если их нет в базе!
     ddl_dims = {
         "dim_date": "date_key UInt32, full_date Date, month_num UInt8, year_num UInt16",
         "dim_product": "product_id String, category String, brand String",
         "dim_customer": "customer_id String, segment String",
         "dim_region": "region_code String, region_name String, country String"
+    }
+    
+    # Словарь для проверки дублей (какой ключ проверять в какой таблице)
+    key_map = {
+        "dim_date": "date_key",
+        "dim_product": "product_id",
+        "dim_customer": "customer_id",
+        "dim_region": "region_code"
     }
     
     for dim in DIMS:
@@ -123,9 +145,12 @@ def rebuild_dimensions(client):
         client.execute(DIM_SQL[dim])
         client.execute(f"exchange tables stroinyi_aa_db.{dim} and stroinyi_aa_db.{stage}")
         client.execute(f"truncate table stroinyi_aa_db.{stage}")
+        
         rows = client.execute(f"select count() from stroinyi_aa_db.{dim}")[0][0]
         print(f"{dim}: {rows} строк")
-
+        
+        # ВЫПОЛНЯЕМ ПРОВЕРКУ НА ДУБЛИКАТЫ
+        check_duplicates(client, dim, key_map[dim])
 
 def load_s3_to_clickhouse(**context) -> None:
     ch_user = Variable.get("clickhouse_tech_user_account")
@@ -142,7 +167,7 @@ def load_s3_to_clickhouse(**context) -> None:
         client.execute(f"create table if not exists stroinyi_aa_db.stg_events as stroinyi_aa_db.fact_orders_raw")
         client.execute("truncate table stroinyi_aa_db.stg_events")
         
-        # 2. Грузим данные из S3 (силами ClickHouse)
+        # 2. Грузим данные из S3 (силами ClickHouse с использованием коллекции)
         client.execute(LOAD_STG)
 
         total = client.execute("select count() from stroinyi_aa_db.stg_events")[0][0]
@@ -152,25 +177,16 @@ def load_s3_to_clickhouse(**context) -> None:
             print("staging пуст, справочники и факт не трогаем")
             return
 
-        # 3. Перестраиваем справочники
+        # 3. Перестраиваем справочники (с проверкой на дубли)
         rebuild_dimensions(client)
 
         # 4. Заполняем факты
         client.execute("""
             create table if not exists stroinyi_aa_db.fact_orders (
-                order_id String,
-                event_date Date,
-                customer_id String,
-                receipt_status String,
-                store_city String,
-                store_region String,
-                product_id String,
-                product_category String,
-                product_brand String,
-                quantity UInt32,
-                gross_amount Decimal(18, 2),
-                discount_amount Decimal(18, 2),
-                net_amount Decimal(18, 2)
+                order_id String, event_date Date, customer_id String, receipt_status String,
+                store_city String, store_region String, product_id String, product_category String,
+                product_brand String, quantity UInt32, gross_amount Decimal(18, 2),
+                discount_amount Decimal(18, 2), net_amount Decimal(18, 2)
             ) ENGINE = MergeTree ORDER BY (event_date, order_id)
         """)
         
