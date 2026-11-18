@@ -1,83 +1,118 @@
 
-"""Читает Parquet из Yandex Object Storage и загружает его в ClickHouse."""
-
 import io
 import json
+import hashlib
 import logging
-from urllib.request import Request, urlopen
-from urllib.parse import quote
+
+from datetime import datetime
+from decimal import Decimal
 
 import boto3
 import pyarrow.parquet as pq
+import requests
 
 from subtask_scripts.config import get_connection_settings
+
 
 LOG = logging.getLogger(__name__)
 
 BUCKET = "dad-ksu-datalab"
 S3_ENDPOINT = "https://storage.yandexcloud.net"
-DATABASE = "chepenko_oe_db"
-TABLE = "supply_lines_raw"
 
-COLUMNS = [
-    "supply_line_id",
-    "supply_id",
-    "event_time",
-    "supplier_id",
-    "product_id",
-    "warehouse_id",
-    "ordered_qty",
-    "received_qty",
-    "received_amount",
-    "delay_days",
-    "shortage_qty",
-    "unit_price",
-]
+CH_DATABASE = "chepenko_oe_db"
 
 
-def clickhouse_query(cfg, query):
-    host = cfg["ch_host"].rstrip("/")
-    if not host.startswith(("http://", "https://")):
-        host = "http://" + host
+def make_key(namespace, value, registry):
+    """
+    Создает стабильный UInt32 ключ из исходного идентификатора.
+    Проверяет коллизии внутри текущего набора данных.
+    """
 
-    port = int(cfg["ch_port"])
-    if ":" not in host.split("://", 1)[1].split("/", 1)[0]:
-        host = f"{host}:{port}"
+    natural_id = str(value)
 
-    url = (
-        f"{host}/?database={quote(DATABASE)}"
-        f"&default_format=TabSeparated"
+    source = f"{namespace}:{natural_id}"
+
+    key = int.from_bytes(
+        hashlib.sha256(source.encode("utf-8")).digest()[:4],
+        byteorder="big",
     )
 
-    credentials = (
-        f'{cfg["ch_user"]}:{cfg["ch_password"]}'
-    ).encode("utf-8")
+    registry_key = (namespace, key)
 
-    import base64
-    auth = base64.b64encode(credentials).decode("ascii")
+    previous = registry.get(registry_key)
 
-    request = Request(
+    if previous is not None and previous != natural_id:
+        raise ValueError(
+            f"Коллизия ключей {namespace}: "
+            f"{previous} и {natural_id}"
+        )
+
+    registry[registry_key] = natural_id
+
+    return key
+
+
+def insert_json_each_row(cfg, table_name, rows):
+
+    if not rows:
+        LOG.info("Таблица %s: нет строк для загрузки", table_name)
+        return
+
+    url = f"http://{cfg['ch_host']}:{cfg['ch_port']}/"
+
+    query = (
+        f"INSERT INTO {CH_DATABASE}.{table_name} "
+        f"FORMAT JSONEachRow"
+    )
+
+    data = "\n".join(
+        json.dumps(
+            row,
+            ensure_ascii=False,
+            default=str,
+        )
+        for row in rows
+    )
+
+    response = requests.post(
         url,
-        data=query.encode("utf-8"),
-        headers={
-            "Authorization": f"Basic {auth}",
-            "Content-Type": "text/plain; charset=utf-8",
-        },
-        method="POST",
+        params={"query": query},
+        data=data.encode("utf-8"),
+        auth=(
+            cfg["ch_user"],
+            cfg["ch_password"],
+        ),
+        timeout=120,
     )
 
-    with urlopen(request, timeout=60) as response:
-        return response.read().decode("utf-8")
+    response.raise_for_status()
+
+    LOG.info(
+        "В таблицу %s загружено %s строк",
+        table_name,
+        len(rows),
+    )
 
 
-def load_s3_to_clickhouse(s3_path, **kwargs):
-    if not s3_path or s3_path == "None":
-        LOG.info("Нет новых сообщений для загрузки.")
-        return "no_data"
+def load_s3_to_clickhouse(s3_key=None, **kwargs):
 
     cfg = get_connection_settings()
 
-    s3 = boto3.client(
+    if not s3_key:
+        ti = kwargs["ti"]
+
+        s3_key = ti.xcom_pull(
+            task_ids="chepenko_oe_rabbit_to_s3"
+        )
+
+    if not s3_key:
+        raise ValueError("Не получен путь к Parquet-файлу из XCom")
+
+    LOG.info("Начинаем загрузку файла %s", s3_key)
+
+    session = boto3.session.Session()
+
+    s3 = session.client(
         "s3",
         endpoint_url=S3_ENDPOINT,
         aws_access_key_id=cfg["s3_access"],
@@ -86,87 +121,200 @@ def load_s3_to_clickhouse(s3_path, **kwargs):
 
     response = s3.get_object(
         Bucket=BUCKET,
-        Key=s3_path,
+        Key=s3_key,
     )
 
-    parquet_bytes = response["Body"].read()
-    table = pq.read_table(io.BytesIO(parquet_bytes))
+    parquet_data = response["Body"].read()
 
-    missing = set(COLUMNS) - set(table.column_names)
-    if missing:
-        raise ValueError(
-            f"В Parquet отсутствуют обязательные поля: {sorted(missing)}"
-        )
-
-    rows = table.select(COLUMNS).to_pylist()
-
-    if not rows:
-        LOG.info("Parquet-файл пуст: %s", s3_path)
-        return "empty_file"
-
-    create_table_sql = f"""
-    CREATE TABLE IF NOT EXISTS {DATABASE}.{TABLE}
-    (
-        supply_line_id String,
-        supply_id String,
-        event_time DateTime64(6, 'UTC'),
-        supplier_id String,
-        product_id String,
-        warehouse_id String,
-        ordered_qty Float64,
-        received_qty Float64,
-        received_amount Float64,
-        delay_days Int32,
-        shortage_qty Float64,
-        unit_price Float64
-    )
-    ENGINE = MergeTree()
-    ORDER BY supply_line_id
-    """
-
-    clickhouse_query(cfg, create_table_sql)
-
-    values = []
-    for row in rows:
-        values.append([
-            row["supply_line_id"],
-            row["supply_id"],
-            row["event_time"].strftime("%Y-%m-%d %H:%M:%S.%f"),
-            row["supplier_id"],
-            row["product_id"],
-            row["warehouse_id"],
-            row["ordered_qty"],
-            row["received_qty"],
-            row["received_amount"],
-            row["delay_days"],
-            row["shortage_qty"],
-            row["unit_price"],
-        ])
-
-    insert_sql = (
-        f"INSERT INTO {DATABASE}.{TABLE} "
-        f"({', '.join(COLUMNS)}) FORMAT JSONEachRow\n"
+    table = pq.read_table(
+        io.BytesIO(parquet_data)
     )
 
-    payload = "".join(
-        json.dumps(
-            dict(zip(COLUMNS, row)),
-            ensure_ascii=False,
-        ) + "\n"
-        for row in values
-    )
-
-    clickhouse_query(cfg, insert_sql + payload)
-
-    LOG.info(
-        "В ClickHouse загружено %s строк из %s",
-        len(rows),
-        s3_path,
-    )
-
-    return {
-        "s3_path": s3_path,
-        "rows_loaded": len(rows),
-        "table": f"{DATABASE}.{TABLE}",
+    expected_columns = {
+        "supply_line_id",
+        "supply_id",
+        "event_time",
+        "supplier_id",
+        "supplier_name",
+        "supplier_country",
+        "product_id",
+        "product_name",
+        "product_category",
+        "product_brand",
+        "warehouse_id",
+        "warehouse_name",
+        "warehouse_region",
+        "ordered_qty",
+        "received_qty",
+        "shortage_qty",
+        "received_amount",
+        "unit_price",
+        "delay_days",
+        "event_type",
     }
 
+    actual_columns = set(table.column_names)
+
+    missing_columns = expected_columns - actual_columns
+
+    if missing_columns:
+        raise ValueError(
+            f"В Parquet отсутствуют колонки: {missing_columns}"
+        )
+
+    source_rows = table.to_pylist()
+
+    if not source_rows:
+        LOG.info("Parquet-файл пуст")
+        return
+
+    registry = {}
+
+    dates = {}
+    suppliers = {}
+    products = {}
+    warehouses = {}
+    facts = {}
+
+    for row in source_rows:
+
+        event_time = row["event_time"]
+
+        if not isinstance(event_time, datetime):
+            raise ValueError(
+                "event_time должен иметь тип datetime"
+            )
+
+        date_value = event_time.date()
+
+        date_key = int(date_value.strftime("%Y%m%d"))
+
+        dates[date_key] = {
+            "date_key": date_key,
+            "date": datetime.combine(
+                date_value,
+                datetime.min.time(),
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        supplier_id = str(row["supplier_id"])
+
+        supplier_key = make_key(
+            "supplier",
+            supplier_id,
+            registry,
+        )
+
+        suppliers[supplier_id] = {
+            "supplier_key": supplier_key,
+            "supplier_id": supplier_id,
+            "name": row.get("supplier_name"),
+            "country": row.get("supplier_country"),
+        }
+
+        product_id = str(row["product_id"])
+
+        product_key = make_key(
+            "product",
+            product_id,
+            registry,
+        )
+
+        products[product_id] = {
+            "product_key": product_key,
+            "product_id": product_id,
+            "name": row.get("product_name"),
+            "category": row.get("product_category"),
+            "brand": row.get("product_brand"),
+        }
+
+        warehouse_id = str(row["warehouse_id"])
+
+        warehouse_key = make_key(
+            "warehouse",
+            warehouse_id,
+            registry,
+        )
+
+        warehouses[warehouse_id] = {
+            "warehouse_key": warehouse_key,
+            "warehouse_id": warehouse_id,
+            "name": row.get("warehouse_name"),
+            "city": None,
+        }
+
+        supply_line_id = str(row["supply_line_id"])
+
+        supply_line_key = make_key(
+            "supply_line",
+            supply_line_id,
+            registry,
+        )
+
+        facts[supply_line_id] = {
+            "supply_line_key": supply_line_key,
+            "date_key": date_key,
+            "supplier_key": supplier_key,
+            "warehouse_key": warehouse_key,
+            "product_key": product_key,
+            "supply_id": str(row["supply_id"]),
+            "ordered_qty": int(row["ordered_qty"]),
+            "received_qty": int(row["received_qty"]),
+            "shortage_qty": int(row["shortage_qty"]),
+            "received_amount": str(
+                Decimal(str(row["received_amount"]))
+            ),
+            "unit_price": str(
+                Decimal(str(row["unit_price"]))
+            ),
+            "delay_days": int(row["delay_days"]),
+            "supply_line_id": supply_line_id,
+        }
+
+    # Сначала загружаем измерения
+
+    insert_json_each_row(
+        cfg,
+        "dim_date",
+        list(dates.values()),
+    )
+
+    insert_json_each_row(
+        cfg,
+        "dim_supplies",
+        list(suppliers.values()),
+    )
+
+    insert_json_each_row(
+        cfg,
+        "dim_product",
+        list(products.values()),
+    )
+
+    insert_json_each_row(
+        cfg,
+        "dim_warehouse",
+        list(warehouses.values()),
+    )
+
+    # Затем загружаем фактовую таблицу
+
+    insert_json_each_row(
+        cfg,
+        "fact_supply_lines",
+        list(facts.values()),
+    )
+
+    LOG.info(
+        "Загрузка завершена. Исходных строк: %s. "
+        "Даты: %s, поставщики: %s, товары: %s, "
+        "склады: %s, факты: %s",
+        len(source_rows),
+        len(dates),
+        len(suppliers),
+        len(products),
+        len(warehouses),
+        len(facts),
+    )
+
+    return len(source_rows)
