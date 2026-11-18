@@ -10,7 +10,7 @@ S3_ENDPOINT = "https://storage.yandexcloud.net"
 S3_BUCKET = "dad-ksu-datalab"
 S3_PREFIX = "DATA/stroinyi_aa"
 
-MAX_MESSAGES = 10000
+MAX_MESSAGES = 100
 
 
 def _s3_client():
@@ -82,7 +82,9 @@ def extract_rabbitmq_to_s3(**context):
 
         payload = "\n".join(lines).encode("utf-8")
         digest = hashlib.md5(payload).hexdigest()[:16]
-        key = f"{S3_PREFIX}/events_{digest}.jsonl"
+        
+        # ВАЖНО: используем .json, чтобы совпадало с маской поиска в ClickHouse!
+        key = f"{S3_PREFIX}/events_{digest}.json" 
 
         _s3_client().put_object(
             Bucket=S3_BUCKET,
@@ -93,15 +95,16 @@ def extract_rabbitmq_to_s3(**context):
         print(f"S3: загружено {len(lines)} строк в s3://{S3_BUCKET}/{key}")
 
     finally:
-        requeued = 0
+        # ВАЖНО: удаляем прочитанные сообщения из очереди (ack), чтобы не читать их вечно
+        acked = 0
         for tag in delivery_tags:
             try:
-                channel.basic_nack(delivery_tag=tag, requeue=True)
-                requeued += 1
+                channel.basic_ack(delivery_tag=tag)
+                acked += 1
             except Exception as error:
-                print(f"RabbitMQ: не удалось вернуть сообщение {tag}: {error}")
-        if requeued:
-            print(f"RabbitMQ: возвращено в очередь: {requeued}")
+                print(f"RabbitMQ: не удалось подтвердить {tag}: {error}")
+        if acked:
+            print(f"RabbitMQ: подтверждено (удалено): {acked}")
 
         try:
             connection.close()

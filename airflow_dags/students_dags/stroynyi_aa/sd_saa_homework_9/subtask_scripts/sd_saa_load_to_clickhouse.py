@@ -11,11 +11,10 @@ S3_ENDPOINT = "https://storage.yandexcloud.net"
 MY_LOGIN = "stroinyi_aa"  
 CH_HOST = "111.88.243.32" 
 
-# --- НАСТРОЙКИ ДЛЯ CLICKHOUSE ---
 S3_COLLECTION = "s3_dad_ksu_datalab"
+# Маска поиска файлов в S3
 S3_FILENAME = f"dad-ksu-datalab/DATA/{MY_LOGIN}/*.json"
 
-# Поля, которые есть в вашем RabbitMQ (из вашего первого ноутбука)
 STG_COLUMNS = (
     "event_id String, event_time String, receipt_id String, receipt_status String, "
     "store_city String, store_region String, product_id String, product_category String, "
@@ -30,7 +29,6 @@ DIMS = [
     "dim_region"
 ]
 
-# SQL для загрузки из S3 в ClickHouse (силами самого ClickHouse)
 LOAD_STG = f"""
 insert into stroinyi_aa_db.stg_events
 select *
@@ -60,32 +58,22 @@ DIM_SQL = {
     """,
     "dim_product": f"""
         insert into stroinyi_aa_db.dim_product_stage
-        select
-            product_id,
-            any(product_category),
-            any(product_brand)
+        select product_id, any(product_category), any(product_brand)
         from stroinyi_aa_db.stg_events
-        group by 1
-        order by 1
+        group by 1 order by 1
     """,
     "dim_customer": f"""
         insert into stroinyi_aa_db.dim_customer_stage
-        select
-            customer_id,
-            any(customer_segment)
+        select customer_id, any(customer_segment)
         from stroinyi_aa_db.stg_events
-        group by 1
-        order by 1
+        group by 1 order by 1
     """,
     "dim_region": f"""
         insert into stroinyi_aa_db.dim_region_stage
-        select 
-            concat(store_region, '_', store_city) as region_code, 
-            any(store_city) as region_name,
-            'Россия' as country
+        select concat(store_region, '_', store_city) as region_code, 
+               any(store_city) as region_name, 'Россия' as country
         from stroinyi_aa_db.stg_events
-        group by 1
-        order by 1
+        group by 1 order by 1
     """
 }
 
@@ -113,37 +101,25 @@ from (
 )
 """
 
-
 def upload_to_s3(**context) -> None:
-    access_key = Variable.get("s3_dad_ksu_dataplatform_access_key")
-    secret_key = Variable.get("s3_dad_ksu_dataplatform_secret_key")
-
-    run_id = context["run_id"].replace(":", "_").replace("+", "_")
-    
-    import glob
-    matching_files = glob.glob(f"/tmp/rabbit_*/{run_id}.json")
-    if matching_files:
-        local_file = matching_files[0]
-    else:
-        raise FileNotFoundError(f"Не найден файл для run_id {run_id}")
-
-    s3_key = f"DATA/{MY_LOGIN}/{run_id}.json"
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=S3_ENDPOINT,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        verify=False
-    )
-    s3.upload_file(local_file, S3_BUCKET, s3_key)
-
+    pass # Эта функция больше не нужна, так как все делает ClickHouse. Оставлена для совместимости.
 
 def rebuild_dimensions(client):
+    # ВАЖНО: Автоматически создаем пустые таблицы, если их нет в базе!
+    ddl_dims = {
+        "dim_date": "date_key UInt32, full_date Date, month_num UInt8, year_num UInt16",
+        "dim_product": "product_id String, category String, brand String",
+        "dim_customer": "customer_id String, segment String",
+        "dim_region": "region_code String, region_name String, country String"
+    }
+    
     for dim in DIMS:
+        client.execute(f"create table if not exists stroinyi_aa_db.{dim} ({ddl_dims[dim]}) engine=MergeTree order by tuple()")
+        
         stage = dim + "_stage"
-        client.execute(f"create table if not exists stroinyi_aa_db.{dim}_stage as stroinyi_aa_db.{dim}")
+        client.execute(f"create table if not exists stroinyi_aa_db.{stage} as stroinyi_aa_db.{dim}")
         client.execute(f"truncate table stroinyi_aa_db.{stage}")
+        
         client.execute(DIM_SQL[dim])
         client.execute(f"exchange tables stroinyi_aa_db.{dim} and stroinyi_aa_db.{stage}")
         client.execute(f"truncate table stroinyi_aa_db.{stage}")
