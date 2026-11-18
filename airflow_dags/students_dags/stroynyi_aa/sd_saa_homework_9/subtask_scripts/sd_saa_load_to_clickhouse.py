@@ -114,9 +114,9 @@ def check_duplicates(client, table_name, key_column):
     """
     dup_count = client.execute(query)[0][0]
     if dup_count > 0:
-        print(f"⚠️ ВНИМАНИЕ: В таблице {table_name} найдено {dup_count} дубликатов по ключу {key_column}!")
+        print(f"ВНИМАНИЕ: В таблице {table_name} найдено {dup_count} дубликатов по ключу {key_column}!")
     else:
-        print(f"✅ В таблице {table_name} дубликатов нет.")
+        print(f"В таблице {table_name} дубликатов нет.")
 
 def rebuild_dimensions(client):
     # Автоматически создаем пустые таблицы, если их нет в базе!
