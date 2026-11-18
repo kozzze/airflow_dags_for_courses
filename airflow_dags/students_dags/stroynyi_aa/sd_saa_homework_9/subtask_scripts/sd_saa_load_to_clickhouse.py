@@ -156,6 +156,24 @@ def load_s3_to_clickhouse(**context) -> None:
         rebuild_dimensions(client)
 
         # 4. Заполняем факты
+        client.execute("""
+            create table if not exists stroinyi_aa_db.fact_orders (
+                order_id String,
+                event_date Date,
+                customer_id String,
+                receipt_status String,
+                store_city String,
+                store_region String,
+                product_id String,
+                product_category String,
+                product_brand String,
+                quantity UInt32,
+                gross_amount Decimal(18, 2),
+                discount_amount Decimal(18, 2),
+                net_amount Decimal(18, 2)
+            ) ENGINE = MergeTree ORDER BY (event_date, order_id)
+        """)
+        
         client.execute("truncate table stroinyi_aa_db.fact_orders")
         client.execute(FACT_SQL)
 
