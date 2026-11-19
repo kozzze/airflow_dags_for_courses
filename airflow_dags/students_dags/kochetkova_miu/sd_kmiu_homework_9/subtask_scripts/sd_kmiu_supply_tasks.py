@@ -70,6 +70,13 @@ def rabbitmq_to_s3():
     for message in collected:
         if "_raw" in message:
             continue
+
+                #  Проверка 1(Completeness / Полнота): проверяем наличие всех обязательных полей и отсутствие NULL
+        required_fields = ["event_time", "product_id", "store_id", "receipt_id", "quantity", "cost_amount", "net_amount"]
+        for field in required_fields:
+            if field not in message or message[field] is None:
+             raise ValueError(f"[DQ ERROR - Completeness] Пустое поле '{field}'")
+
             
         sale_date = datetime.datetime.strptime(message["event_time"].split("T")[0], "%Y-%m-%d").date()
         date_key = int(sale_date.strftime("%Y%m%d"))
@@ -81,6 +88,11 @@ def rabbitmq_to_s3():
 
         quantity = int(message["quantity"])
         cost_amount = int(float(message["cost_amount"]))
+
+                # Проверка 2 (Validity / Валидность): количество должно быть > 0, а сумма закупки >= 0
+        if quantity <= 0 or cost_amount < 0:
+           raise ValueError(f"[DQ ERROR - Validity] Некорректное количество ({quantity}) или сумма ({cost_amount})")
+
         net_amount = float(message["net_amount"])
         unit_purchase_price = int(net_amount / quantity) if quantity > 0 else 0
         rejected_quantity = 0
@@ -121,6 +133,10 @@ def rabbitmq_to_s3():
             'unit_purchase_price': unit_purchase_price,
             'rejected_quantity': rejected_quantity
         })
+            # Проверка 3 (Completeness / Полнота): убеждаемся, что из очереди пришли данные (не 0 строк)
+    if len(fact_rows) == 0:
+     raise ValueError("[DQ ERROR - Completeness] Из очереди RabbitMQ получено 0 строк!")
+    print(f"[DQ OK] Completeness и Validity пройдены ({len(fact_rows)} строк)")
 
     session = boto3.session.Session()
     s3_client = session.client(
@@ -240,3 +256,18 @@ def s3_to_clickhouse():
             client.execute(f"TRUNCATE TABLE IF EXISTS kochetkova_miu_db.{table_name};")
             client.insert_dataframe(f"INSERT INTO kochetkova_miu_db.{table_name} VALUES", df)
             print(f"Загружено в ClickHouse: {table_name} ({len(df)} строк)")
+                    # Проверка 4 (Uniqueness / Уникальность): проверяем справочники в ClickHouse на отсутствие дублей по ключу
+        dim_keys = {
+        'dim_date': 'date_key',
+        'dim_product': 'product_key',
+        'dim_warehouse': 'warehouse_key',
+        'dim_supplier': 'supplier_key'
+        }
+        for dim_table, pk_col in dim_keys.items():
+            total_rows, unique_keys = client.execute(
+            f"SELECT count(), uniq({pk_col}) FROM kochetkova_miu_db.{dim_table};"
+        )
+        if total_rows != unique_keys:
+            raise ValueError(f"[DQ ERROR - Uniqueness] Найдены дубли в {dim_table}!")
+        print(f"[DQ OK - Uniqueness] {dim_table}: дублей нет (строк: {total_rows})")
+
