@@ -126,12 +126,12 @@ def s3_to_clickhouse(ti):
 
     queries = {
         "dim_date": f"""
-            insert into {CLICKHOUSE_DB}.dim_date_change (date_key, full_date)
+            insert into {CLICKHOUSE_DB}.dim_date (date_key, full_date)
             select distinct toYYYYMMDD(snapshot_date), snapshot_date
             from {source}
         """,
         "dim_product": f"""
-            insert into {CLICKHOUSE_DB}.dim_product_change
+            insert into {CLICKHOUSE_DB}.dim_product
                 (sku, product_name, brand, category, subcategory, supplier)
             select
                 product_id,
@@ -144,7 +144,7 @@ def s3_to_clickhouse(ti):
             group by product_id
         """,
         "dim_location": f"""
-            insert into {CLICKHOUSE_DB}.dim_location_change
+            insert into {CLICKHOUSE_DB}.dim_location
                 (location_code, location_type, city, region)
             select
                 warehouse_id,
@@ -185,8 +185,6 @@ def s3_to_clickhouse(ti):
             client.execute(
                 sql + " settings input_format_skip_unknown_fields = 1", params
             )
-            client.execute(f'exchange tables {table}_change and {table}')
-            client.execute(f'truncate table {table}_change')
             
             count = client.execute(
                 f"select count() from {CLICKHOUSE_DB}.{table} final"

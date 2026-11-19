@@ -20,6 +20,15 @@ DIMS = [
     "dim_status",
 ]
 
+DIM_KEYS = {
+    "dim_date": "date_id",
+    "dim_products": "product_id",
+    "dim_customer": "customer_id",
+    "dim_store": "store_id",
+    "dim_region": "region_id",
+    "dim_status": "status_id",
+}
+
 LOAD_STG = f"""
 insert into piksaev_kiu_db.stg_events
 select *
@@ -150,7 +159,18 @@ def rebuild_dimensions(client):
         client.execute(f"exchange tables piksaev_kiu_db.{dim} and piksaev_kiu_db.{stage}")
         client.execute(f"truncate table piksaev_kiu_db.{stage}")
         rows = client.execute(f"select count() from piksaev_kiu_db.{dim}")[0][0]
+        key = DIM_KEYS[dim]
+        duplicates = client.execute(
+            f"select count() from ("
+            f"select {key} from piksaev_kiu_db.{dim} "
+            f"group by {key} having count() > 1"
+            f")"
+        )[0][0]
         print(f"{dim}: {rows} строк")
+        if duplicates:
+            print(f"{dim}: найдены дубликаты по {key}: {duplicates}")
+        else:
+            print(f"{dim}: дубликатов нет")
 
 
 def load_s3_to_clickhouse(**context):
