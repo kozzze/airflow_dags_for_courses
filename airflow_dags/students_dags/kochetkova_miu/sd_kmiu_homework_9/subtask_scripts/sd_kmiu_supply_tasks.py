@@ -266,7 +266,7 @@ def s3_to_clickhouse():
         for dim_table, pk_col in dim_keys.items():
             total_rows, unique_keys = client.execute(
             f"SELECT count(), uniq({pk_col}) FROM kochetkova_miu_db.{dim_table};"
-        )
+        )[0]
         if total_rows != unique_keys:
             raise ValueError(f"[DQ ERROR - Uniqueness] Найдены дубли в {dim_table}!")
         print(f"[DQ OK - Uniqueness] {dim_table}: дублей нет (строк: {total_rows})")
