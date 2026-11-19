@@ -21,7 +21,7 @@ LOG = logging.getLogger(__name__)
 BUCKET = "dad-ksu-datalab"
 S3_ENDPOINT = "https://storage.yandexcloud.net"
 QUEUE = "supply.queue"
-BATCH_SIZE = 1000
+BATCH_SIZE = 800
 
 
 def fetch_rabbit_to_s3(login="chepenko_oe", **kwargs):
